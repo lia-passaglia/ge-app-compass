@@ -18,6 +18,8 @@ from typing import Any
 import vertexai
 from dotenv import load_dotenv
 from google.adk.artifacts import GcsArtifactService, InMemoryArtifactService
+from google.adk.memory import InMemoryMemoryService
+from google.adk.memory.vertex_ai_memory_bank_service import VertexAiMemoryBankService
 from google.cloud import logging as google_cloud_logging
 from vertexai.agent_engines.templates.adk import AdkApp
 
@@ -31,7 +33,7 @@ load_dotenv()
 
 class AgentEngineApp(AdkApp):
     def set_up(self) -> None:
-        """Initialize the agent engine app with logging and telemetry."""
+        """Initialize the agent engine app with logging, telemetry, and Memory Bank."""
         vertexai.init()
         setup_telemetry()
         super().set_up()
@@ -55,6 +57,23 @@ class AgentEngineApp(AdkApp):
 
 gemini_location = os.environ.get("GOOGLE_CLOUD_LOCATION")
 logs_bucket_name = os.environ.get("LOGS_BUCKET_NAME")
+memory_engine_id = os.environ.get("MEMORY_BANK_ENGINE_ID")
+gcp_project = os.environ.get("GOOGLE_CLOUD_PROJECT")
+
+# Memory Bank Service Builder for Cross-Session Retrieval & Memory Persistence
+def memory_service_builder():
+    if memory_engine_id and gcp_project:
+        try:
+            return VertexAiMemoryBankService(
+                project=gcp_project,
+                location=gemini_location or "us-central1",
+                agent_engine_id=memory_engine_id,
+            )
+        except Exception as e:
+            logging.warning(f"Failed to initialize VertexAiMemoryBankService: {e}")
+    return InMemoryMemoryService()
+
+
 agent_runtime = AgentEngineApp(
     app=adk_app,
     artifact_service_builder=lambda: (
@@ -62,4 +81,5 @@ agent_runtime = AgentEngineApp(
         if logs_bucket_name
         else InMemoryArtifactService()
     ),
+    memory_service_builder=memory_service_builder,
 )

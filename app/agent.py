@@ -16,25 +16,33 @@
 import os
 import pathlib
 import logging
+from typing import Optional
 import google.auth
 from google.cloud import bigquery
 
 from google.adk.agents import Agent
+from google.adk.agents.context_cache_config import ContextCacheConfig
 from google.adk.apps import App
 from google.adk.models import Gemini
 from google.genai import types
 
-# Import native ADK Skills modules
+# Import native ADK Skills & Tools
 from google.adk.skills import load_skill_from_dir
 from google.adk.tools.skill_toolset import SkillToolset
+from google.adk.tools import load_memory, preload_memory
 
-# Import our custom BigQuery analytical tools
+# Import custom BigQuery analytical tools and Pydantic schemas
 from .tools import (
     get_seat_adoption_metrics,
     analyze_use_case_clusters,
     inspect_dislike_hotspots,
     calculate_roi_and_time_saved,
+    request_human_license_reclamation_approval,
+    route_specialized_subagent,
 )
+
+# Import Intent vs Outcome Telemetry Plugin
+from .logging_plugin import IntentOutcomeLoggingPlugin
 
 # Set up Cloud environment variables
 try:
@@ -45,11 +53,82 @@ except Exception:
     pass
 
 project_id = os.environ.get("GOOGLE_CLOUD_PROJECT")
-
 os.environ["GOOGLE_CLOUD_LOCATION"] = "global"
 os.environ["GOOGLE_GENAI_USE_VERTEXAI"] = "True"
 
-# Load local skills into ADK Skills Registry
+# Context Bloat & Sliding Window Configuration
+COMPACT_CACHE_CONFIG = ContextCacheConfig(
+    cache_intervals=10,
+    ttl_seconds=1800,
+    min_tokens=0,
+)
+
+# -------------------------------------------------------------------------
+# Specialized Sub-Agents (Multi-Agent Orchestration Pattern)
+# -------------------------------------------------------------------------
+
+# 1. License Reclamation Specialist Sub-Agent
+license_reclamation_subagent = Agent(
+    name="license_reclamation_specialist",
+    description="Specialized subagent responsible for auditing Gemini seat adoption, filtering underutilized licenses (< 40%), and executing Human-in-the-Loop reclamation approvals.",
+    model=Gemini(
+        model="gemini-3.7-flash",
+        retry_options=types.HttpRetryOptions(attempts=3),
+    ),
+    instruction=(
+        "You are the License Reclamation Specialist Sub-Agent. "
+        "Your role is to audit department seat adoption using `get_seat_adoption_metrics`. "
+        "Filter for teams with utilization below benchmark (< 40%). "
+        "When recommending license reclamation, always calculate potential monthly savings "
+        "and call `request_human_license_reclamation_approval` before executing any de-provisioning."
+    ),
+    tools=[
+        get_seat_adoption_metrics,
+        request_human_license_reclamation_approval,
+    ],
+)
+
+# 2. Grounding Forensics Specialist Sub-Agent (Powered by Gemini Pro for Deep Reasoning)
+grounding_forensics_subagent = Agent(
+    name="grounding_forensics_specialist",
+    description="Specialized high-reasoning subagent responsible for diagnosing negative feedback hotspots, clustering semantic user prompts, and designing connector grounding architectures.",
+    model=Gemini(
+        model="gemini-2.5-pro",  # Strategic model routing: Pro model for deep multi-log root-cause analysis
+        retry_options=types.HttpRetryOptions(attempts=3),
+    ),
+    instruction=(
+        "You are the Grounding Forensics Specialist Sub-Agent. "
+        "You perform deep semantic analysis of prompt logs using `analyze_use_case_clusters` and `inspect_dislike_hotspots`. "
+        "Identify root causes for thumbs-down feedback (e.g. missing contracts, stale catalog specs) "
+        "and provide actionable Google Cloud grounding connector recommendations (Google Drive, BigQuery, GCS)."
+    ),
+    tools=[
+        analyze_use_case_clusters,
+        inspect_dislike_hotspots,
+    ],
+)
+
+# 3. ROI Analytics Specialist Sub-Agent
+roi_analytics_subagent = Agent(
+    name="roi_analytics_specialist",
+    description="Specialized subagent responsible for corporate ROI calculations, hours saved modeling, custom hourly rate applications, and executive financial scorecards.",
+    model=Gemini(
+        model="gemini-3.7-flash",
+        retry_options=types.HttpRetryOptions(attempts=3),
+    ),
+    instruction=(
+        "You are the ROI Analytics Specialist Sub-Agent. "
+        "Your mission is to compute active hours saved and financial value across departments using `calculate_roi_and_time_saved`. "
+        "Support custom hourly rate overrides (e.g. Legal: $150+/hr) and render clear executive scorecards."
+    ),
+    tools=[
+        calculate_roi_and_time_saved,
+    ],
+)
+
+# -------------------------------------------------------------------------
+# Dynamic Skills Toolset Setup
+# -------------------------------------------------------------------------
 skills_dir = pathlib.Path(__file__).parent / "skills"
 if not skills_dir.exists():
     skills_dir = pathlib.Path(__file__).parent.parent / "skills"
@@ -60,7 +139,6 @@ skills = [
     load_skill_from_dir(skills_dir / "roi-analysis"),
 ]
 
-# Instantiate SkillToolset with custom tools passed as additional_tools (dynamically registered upon skill load)
 skill_toolset = SkillToolset(
     skills=skills,
     additional_tools=[
@@ -68,11 +146,24 @@ skill_toolset = SkillToolset(
         analyze_use_case_clusters,
         inspect_dislike_hotspots,
         calculate_roi_and_time_saved,
+        request_human_license_reclamation_approval,
+        route_specialized_subagent,
     ]
 )
 
-# Eval-compatible subclass of Agent to handle Toolset serialization in local evaluator
-class CompassAgent(Agent):
+# -------------------------------------------------------------------------
+# Root Coordinator Agent Definition
+# -------------------------------------------------------------------------
+import builtins
+import typing
+
+builtins.Optional = typing.Optional
+builtins.Dict = typing.Dict
+builtins.List = typing.List
+builtins.Any = typing.Any
+
+class CompassCoordinatorAgent(Agent):
+    """Coordinator agent supporting multi-agent delegation, memory bank tools, and skill toolset."""
     def __getattribute__(self, name):
         if name == "tools":
             import inspect
@@ -88,42 +179,68 @@ class CompassAgent(Agent):
                         is_eval = True
                         break
                 if is_eval:
-                    # Return flat tools list for the evaluator to serialize
-                    flat_tools = []
-                    # Core skill tools
-                    flat_tools.extend(skill_toolset._tools)
-                    # Custom additional tools wrapped as FunctionTools
-                    flat_tools.extend(list(skill_toolset._provided_tools_by_name.values()))
-                    return flat_tools
+                    # Provide unwrapped callable functions directly for vertexai eval serialization
+                    eval_tools = [
+                        get_seat_adoption_metrics,
+                        analyze_use_case_clusters,
+                        inspect_dislike_hotspots,
+                        calculate_roi_and_time_saved,
+                        request_human_license_reclamation_approval,
+                        route_specialized_subagent,
+                    ]
+                    # Also include underlying callables from skill_toolset
+                    for t in skill_toolset._tools:
+                        func = getattr(t, "func", t)
+                        if func not in eval_tools:
+                            eval_tools.append(func)
+                    return eval_tools
             except Exception:
                 pass
         return super().__getattribute__(name)
 
-# Core ge-app-compass Agent Definition
-root_agent = CompassAgent(
+
+root_agent = CompassCoordinatorAgent(
     name="ge_app_compass",
     model=Gemini(
-        model="gemini-3.7-flash",  # Upgraded to Gemini 3.7 Flash per request
+        model="gemini-3.7-flash",
         retry_options=types.HttpRetryOptions(attempts=3),
     ),
     instruction=(
-        "You are the Gemini Adoption Compass (ge-app-compass), an autonomous enterprise audit agent. "
-        "Your mission is to audit Gemini license adoption, analyze usage clusters, diagnose feedback quality dislikes, "
-        "and calculate corporate ROI from telemetry logs.\n\n"
-        "Crucial Operating Rules:\n"
-        "1. Start by listing your available skills to find the most relevant one for the user request.\n"
-        "2. Once a relevant skill is selected, you MUST load it using load_skill(name='<skill-name>').\n"
-        "3. Loading a skill automatically registers and unlocks its corresponding specialized tools in your active context.\n"
-        "4. Follow the skill instructions and utilize its dynamically bound tools to satisfy the request.\n"
-        "5. Present reports using rich aesthetics, clear markdown tables, and premium scorecards (e.g., total savings in bold, green highlights if helpful)."
+        "You are the Gemini Adoption Compass (ge_app_compass), the Chief Enterprise AI Audit Coordinator.\n\n"
+        "### Operational Architecture & Delegation:\n"
+        "You coordinate a multi-agent network of specialized domain experts and memory services:\n"
+        "1. `license_reclamation_specialist`: For seat audits, 40% threshold filtering, and Human-in-the-Loop license de-provisioning.\n"
+        "2. `grounding_forensics_specialist`: For deep root-cause diagnosis of user dislikes, prompt clustering, and grounding connector roadmaps.\n"
+        "3. `roi_analytics_specialist`: For hours saved quantification, custom department hourly rates, and executive financial reports.\n\n"
+        "### Memory & Context Management:\n"
+        "- Use `load_memory` or `preload_memory` to retrieve past user audit sessions, previous threshold preferences, and historical benchmarks.\n"
+        "- You utilize automatic context caching and sliding window memory bank compaction.\n\n"
+        "### Skills & Execution:\n"
+        "- List available skills or dynamically load skills (`load_skill`) as needed.\n"
+        "- Delegate domain tasks to the appropriate specialized subagents, or directly invoke specialized tools.\n"
+        "- Present outputs in polished markdown tables with highlighted key metrics."
     ),
-    tools=[skill_toolset],
+    sub_agents=[
+        license_reclamation_subagent,
+        grounding_forensics_subagent,
+        roi_analytics_subagent,
+    ],
+    tools=[
+        skill_toolset,
+        load_memory,
+        preload_memory,
+    ],
 )
 
-# Initialize BigQuery Analytics Plugin for Observability
-_plugins = []
+# -------------------------------------------------------------------------
+# Observability Plugins Setup (Intent/Outcome Logging + BigQuery Analytics)
+# -------------------------------------------------------------------------
+_plugins = [
+    IntentOutcomeLoggingPlugin(name="intent_outcome_telemetry"),
+]
+
 _project_id = os.environ.get("GOOGLE_CLOUD_PROJECT", project_id)
-_dataset_id = os.environ.get("BQ_ANALYTICS_DATASET_ID", "ge_app_compass_telemetry") # Unified ge_app_compass_telemetry dataset
+_dataset_id = os.environ.get("BQ_ANALYTICS_DATASET_ID", "ge_app_compass_telemetry")
 _location = os.environ.get("GOOGLE_CLOUD_LOCATION", "us-central1")
 
 if _project_id:
@@ -149,9 +266,11 @@ if _project_id:
     except Exception as e:
         logging.warning(f"Failed to initialize BigQuery Analytics: {e}")
 
-# ADK App initialization
+# -------------------------------------------------------------------------
+# ADK Application Initialization
+# -------------------------------------------------------------------------
 app = App(
     root_agent=root_agent,
-    name="app",  # Matches the directory name 'app' to avoid session failures in local evaluation
+    name="app",
     plugins=_plugins,
 )

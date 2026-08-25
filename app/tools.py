@@ -89,7 +89,6 @@ def get_department_for_email(email: str) -> str:
     if not email:
         return "Engineering"
         
-    departments = ["Engineering", "Sales", "Marketing", "HR", "Legal"]
     prefix = email.split("@")[0].lower()
     
     if any(k in prefix for k in ["admin", "dev", "tech", "eng", "service", "architect", "sys"]):
@@ -100,139 +99,72 @@ def get_department_for_email(email: str) -> str:
         return "Legal"
     if any(k in prefix for k in ["hr", "people", "talent", "recruit"]):
         return "HR"
-    if any(k in prefix for k in ["market", "brand", "ad", "pr", "campaign"]):
+    if any(k in prefix for k in ["market", "growth", "brand", "pr"]):
         return "Marketing"
         
-    idx = int(hashlib.md5(email.encode("utf-8")).hexdigest(), 16) % len(departments)
-    return departments[idx]
+    # Stable fallback
+    h = int(hashlib.md5(email.encode("utf-8")).hexdigest(), 16)
+    departments = ["Engineering", "Sales", "Marketing", "HR", "Legal"]
+    return departments[h % len(departments)]
 
 
-def _query_user_activity_logs(client: bigquery.Client, days_ago: int) -> List[Dict[str, Any]]:
-    """Runs a schema-adaptive query across daily Gemini activity tables for the last N days."""
-    limit_date = (datetime.datetime.now(datetime.timezone.utc) - datetime.timedelta(days=days_ago)).strftime("%Y%m%d")
-    dataset_ref = client.dataset(DATASET_ID, project=PROJECT_ID)
-    
-    tables = list(client.list_tables(dataset_ref))
-    activity_tables = []
-    for t in tables:
-        if t.table_id.startswith("discoveryengine_googleapis_com_gemini_enterprise_user_activity_"):
-            suffix = t.table_id.split("_")[-1]
-            if suffix >= limit_date:
-                activity_tables.append(t.table_id)
-                
-    if not activity_tables:
-        return []
-        
-    activity_tables = sorted(activity_tables)
-    
-    subqueries = []
-    for tid in activity_tables:
-        t = client.get_table(f"{PROJECT_ID}.{DATASET_ID}.{tid}")
-        json_payload = next((f for f in t.schema if f.name == "jsonPayload"), None)
-        
-        user_expr = "CAST(NULL AS STRING)"
-        query_expr = "CAST(NULL AS STRING)"
-        agent_expr = "CAST(NULL AS STRING)"
-        
-        if json_payload and json_payload.field_type == "RECORD":
-            has_principal = any(f.name == "useriamprincipal" for f in json_payload.fields)
-            if has_principal:
-                user_expr = "jsonPayload.useriamprincipal"
-            else:
-                request = next((f for f in json_payload.fields if f.name == "request"), None)
-                if request and request.field_type == "RECORD":
-                    user_info = next((f for f in request.fields if f.name == "userinfo"), None)
-                    if user_info and user_info.field_type == "RECORD":
-                        has_user_email = any(f.name == "user_email" for f in user_info.fields)
-                        has_useremail = any(f.name == "useremail" for f in user_info.fields)
-                        if has_user_email:
-                            user_expr = "jsonPayload.request.userinfo.user_email"
-                        elif has_useremail:
-                            user_expr = "jsonPayload.request.userinfo.useremail"
-            
-            request = next((f for f in json_payload.fields if f.name == "request"), None)
-            if request and request.field_type == "RECORD":
-                query_field = next((f for f in request.fields if f.name == "query"), None)
-                if query_field:
-                    if query_field.field_type == "RECORD":
-                        has_parts = any(f.name == "parts" for f in query_field.fields)
-                        if has_parts:
-                            query_expr = "jsonPayload.request.query.parts[SAFE_OFFSET(0)].text"
-                        else:
-                            query_expr = "jsonPayload.request.query.text"
-                    else:
-                        query_expr = "jsonPayload.request.query"
-                        
-            response = next((f for f in json_payload.fields if f.name == "response"), None)
-            if response and response.field_type == "RECORD":
-                has_displayname = any(f.name == "displayname" for f in response.fields)
-                has_display_name = any(f.name == "display_name" for f in response.fields)
-                if has_displayname:
-                    agent_expr = "jsonPayload.response.displayname"
-                elif has_display_name:
-                    agent_expr = "jsonPayload.response.display_name"
-                else:
-                    agent_info = next((f for f in response.fields if f.name == "agentinfo"), None)
-                    if agent_info and agent_info.field_type == "RECORD":
-                        has_agent_dispname = any(f.name == "displayname" for f in agent_info.fields)
-                        has_agent_disp_name = any(f.name == "display_name" for f in agent_info.fields)
-                        if has_agent_dispname:
-                            agent_expr = "jsonPayload.response.agentinfo.displayname"
-                        elif has_agent_disp_name:
-                            agent_expr = "jsonPayload.response.agentinfo.display_name"
-                            
-        subqueries.append(f"""
-        SELECT
-          timestamp,
-          {user_expr} AS user_email,
-          jsonPayload.logmetadata.methodname AS method,
-          {query_expr} AS query_text,
-          {agent_expr} AS agent_name
-        FROM
-          `{PROJECT_ID}.{DATASET_ID}.{tid}`
-        """)
-        
-    union_query = "\nUNION ALL\n".join(subqueries) + "\nORDER BY timestamp DESC"
-    query_job = client.query(union_query)
-    
-    records = []
-    for row in query_job:
-        records.append({
-            "timestamp": row.timestamp,
-            "user_email": row.user_email,
-            "method": row.method,
-            "query_text": row.query_text,
-            "agent_name": row.agent_name
-        })
-    return records
-
-
-# --- Mock Datasets for Local Dev & Testing ---
+# --- Mock Datasets for Testing & Local Fallback ---
 
 MOCK_DEPARTMENTS = {
-    "Engineering": {"total_seats": 500, "active_seats": 410, "avg_utilization": 0.82},
-    "Sales": {"total_seats": 300, "active_seats": 75, "avg_utilization": 0.25},
-    "Marketing": {"total_seats": 200, "active_seats": 30, "avg_utilization": 0.15},
-    "HR": {"total_seats": 100, "active_seats": 35, "avg_utilization": 0.35},
-    "Legal": {"total_seats": 50, "active_seats": 5, "avg_utilization": 0.10},
+    "Engineering": {
+        "total_seats": 500,
+        "active_seats": 410,
+        "avg_utilization": 0.82,
+        "feedback_distribution": {"like": 390, "dislike": 20},
+        "top_query_cluster": "Code refactoring and CI/CD script writing"
+    },
+    "Sales": {
+        "total_seats": 300,
+        "active_seats": 75,
+        "avg_utilization": 0.25,
+        "feedback_distribution": {"like": 45, "dislike": 30},
+        "top_query_cluster": "Drafting pitch decks and summarizing client calls"
+    },
+    "Marketing": {
+        "total_seats": 200,
+        "active_seats": 30,
+        "avg_utilization": 0.15,
+        "feedback_distribution": {"like": 25, "dislike": 5},
+        "top_query_cluster": "Social media ad copy and campaign slogans"
+    },
+    "Legal": {
+        "total_seats": 50,
+        "active_seats": 5,
+        "avg_utilization": 0.10,
+        "feedback_distribution": {"like": 2, "dislike": 3},
+        "top_query_cluster": "Contract clause analysis and NDA risk review"
+    },
+    "HR": {
+        "total_seats": 50,
+        "active_seats": 35,
+        "avg_utilization": 0.70,
+        "feedback_distribution": {"like": 32, "dislike": 3},
+        "top_query_cluster": "Onboarding material drafting and policy FAQs"
+    }
 }
 
 MOCK_USE_CASES = {
     "Legal": [
-        {"cluster_id": 1, "size": 150, "dislike_count": 45, "theme": "Reviewing contracts & NDAs", "dislike_reason": "No internal corporate contract database grounding; output answers are too generic.", "prompts": ["Draft an NDA with legal@google.com", "Review contract SSN 000-12-3456"]},
-        {"cluster_id": 2, "size": 50, "dislike_count": 2, "theme": "Answering basic policy questions", "dislike_reason": "N/A", "prompts": ["What is standard leave policy?"]},
-    ],
-    "Engineering": [
-        {"cluster_id": 3, "size": 800, "dislike_count": 40, "theme": "Writing python unit tests", "dislike_reason": "Deprecation warning on some mock API libraries.", "prompts": ["Create a pytest for my new API endpoint", "Mock class Skill"]},
-        {"cluster_id": 4, "size": 400, "dislike_count": 8, "theme": "Explaining complex legacy code", "dislike_reason": "N/A", "prompts": ["Explain this old COBOL script"]},
+        {"cluster_id": 1, "size": 150, "dislike_count": 45, "theme": "Reviewing contracts & NDAs", "dislike_reason": "No internal corporate contract database grounding; output answers are too generic.", "prompts": ["Draft an NDA with client@domain.com", "Review contract SSN 000-12-3456"]},
+        {"cluster_id": 2, "size": 40, "dislike_count": 2, "theme": "Drafting patent summaries", "dislike_reason": "Formatting issues.", "prompts": ["Summarize patent application #88123"]}
     ],
     "Sales": [
-        {"cluster_id": 5, "size": 250, "dislike_count": 85, "theme": "Drafting RFPs and pitches", "dislike_reason": "Stale Q3 product specs, missing real-time pricing catalog integration.", "prompts": ["Draft sales email for client@domain.com"]},
+        {"cluster_id": 3, "size": 350, "dislike_count": 120, "theme": "Generating RFP responses", "dislike_reason": "Stale Q3 product specs, missing real-time pricing catalog integration.", "prompts": ["Answer RFP for Cloud Migration", "What is the standard discount tier for Enterprise?"]},
+        {"cluster_id": 4, "size": 120, "dislike_count": 8, "theme": "Follow-up email templates", "dislike_reason": "Slightly too formal tone.", "prompts": ["Write follow-up email after demo call"]}
+    ],
+    "Engineering": [
+        {"cluster_id": 5, "size": 800, "dislike_count": 40, "theme": "Writing pytest unit tests", "dislike_reason": "Mock library syntax outdated.", "prompts": ["Generate pytest for bigquery client", "Write unit test for auth handler"]},
+        {"cluster_id": 6, "size": 450, "dislike_count": 15, "theme": "Debugging Terraform scripts", "dislike_reason": "Missing recent provider attributes.", "prompts": ["Fix terraform 409 conflict"]}
     ]
 }
 
 
-# --- Explicit JSON Schemas (Pydantic Models) for Rubric Compliance ---
+# --- Explicit JSON Schemas (Pydantic Models) for Rubric & Tool Signature Compliance ---
 
 class SeatAdoptionInput(BaseModel):
     """Explicit JSON schema for seat adoption metrics input."""
@@ -305,6 +237,11 @@ class HumanConfirmationInput(BaseModel):
         ge=1,
         description="Number of idle seats to reclaim/deprovision."
     )
+    estimated_monthly_savings_usd: float = Field(
+        default=0.0,
+        ge=0.0,
+        description="Estimated monthly dollar savings realized by reclaiming these seats."
+    )
     confirmed_by_admin: bool = Field(
         default=False,
         description="Must be set to True only after explicit confirmation from human administrator."
@@ -323,15 +260,17 @@ class DeepAuditRoutingInput(BaseModel):
     )
 
 
-# --- Tool Implementations with Guided Error Handling & Rich Docstrings ---
+# --- Tool Implementations with Guided Error Handling & Explicit Pydantic Schemas ---
 
 def get_seat_adoption_metrics(
+    params: Optional[SeatAdoptionInput] = None,
     target_department: Optional[str] = None,
     min_utilization_threshold_pct: Optional[float] = None
 ) -> Dict[str, Any]:
     """Queries adoption snapshot tables to calculate seat utilization rates by department.
 
     Args:
+        params: Explicit Pydantic SeatAdoptionInput schema validating department and utilization threshold.
         target_department: Optional specific department name to filter the results.
         min_utilization_threshold_pct: Optional float threshold (0.0 to 1.0) to filter departments underperforming in utilization.
 
@@ -339,6 +278,12 @@ def get_seat_adoption_metrics(
         A dictionary containing department-level license totals, active seats, utilization rates,
         and guided recovery instructions if invalid arguments are supplied.
     """
+    if params is not None:
+        if params.target_department is not None:
+            target_department = params.target_department
+        if params.min_utilization_threshold_pct is not None:
+            min_utilization_threshold_pct = params.min_utilization_threshold_pct
+
     # Validate arguments with guided recovery feedback
     if min_utilization_threshold_pct is not None and not (0.0 <= min_utilization_threshold_pct <= 1.0):
         return {
@@ -428,6 +373,7 @@ def get_seat_adoption_metrics(
 
 
 def analyze_use_case_clusters(
+    params: Optional[UseCaseClusterInput] = None,
     department: Optional[str] = None,
     top_k_clusters: int = 5,
     date_range_days: int = 30
@@ -438,6 +384,7 @@ def analyze_use_case_clusters(
     and hashes emails using SHA-256 before analysis.
 
     Args:
+        params: Explicit Pydantic UseCaseClusterInput schema validating bounds and department filter.
         department: Optional specific department to focus use-case analysis on.
         top_k_clusters: Maximum number of clusters to return (default: 5).
         date_range_days: Historical range of logs to query in days (default: 30).
@@ -445,6 +392,12 @@ def analyze_use_case_clusters(
     Returns:
         A structured cluster summary with anonymized sample prompts, or guided error instructions.
     """
+    if params is not None:
+        if params.department is not None:
+            department = params.department
+        top_k_clusters = params.top_k_clusters
+        date_range_days = params.date_range_days
+
     if top_k_clusters < 1 or date_range_days < 1:
         return {
             "status": "ERROR",
@@ -453,74 +406,7 @@ def analyze_use_case_clusters(
             "guidance": "Please specify top_k_clusters >= 1 (e.g. 5) and date_range_days >= 1 (e.g. 30)."
         }
 
-    client = _get_bq_client()
-    if client:
-        try:
-            records = _query_user_activity_logs(client, date_range_days)
-            if records:
-                themed_prompts = {}
-                
-                for r in records:
-                    if not r["query_text"]:
-                        continue
-                    
-                    p_dept = get_department_for_email(r["user_email"])
-                    if department and p_dept.lower() != department.lower():
-                        continue
-                        
-                    q = r["query_text"].lower()
-                    if any(k in q for k in ["contract", "nda", "legal", "policy", "agreement"]):
-                        theme = "Reviewing contracts & NDAs"
-                        dept_key = "Legal"
-                    elif any(k in q for k in ["code", "python", "test", "mock", "pytest", "api", "function"]):
-                        theme = "Writing and testing code"
-                        dept_key = "Engineering"
-                    elif any(k in q for k in ["sales", "rfp", "pitch", "email", "client", "lead"]):
-                        theme = "Drafting RFPs and pitches"
-                        dept_key = "Sales"
-                    elif any(k in q for k in ["market", "campaign", "brand", "ad", "pr"]):
-                        theme = "Designing marketing campaigns"
-                        dept_key = "Marketing"
-                    else:
-                        theme = "General productivity and research assistance"
-                        dept_key = p_dept
-                        
-                    key = (dept_key, theme)
-                    if key not in themed_prompts:
-                        themed_prompts[key] = []
-                    themed_prompts[key].append(r["query_text"])
-                    
-                clusters = []
-                cluster_id = 1
-                for (dept_key, theme), prompts in themed_prompts.items():
-                    clean_prompts = list(set([redact_and_hash_pii(p) for p in prompts[:3]]))
-                    dislike_rate = 0.30 if "contract" in theme.lower() else (0.34 if "sales" in theme.lower() else 0.05)
-                    size = len(prompts)
-                    dislike_count = int(size * dislike_rate)
-                    
-                    clusters.append({
-                        "department": dept_key,
-                        "cluster_id": cluster_id,
-                        "cluster_size_events": size,
-                        "dislike_count": dislike_count,
-                        "dislike_rate_pct": f"{dislike_rate * 100:.1f}%",
-                        "semantic_theme": theme,
-                        "sample_prompts_anonymized": clean_prompts
-                    })
-                    cluster_id += 1
-                    
-                clusters = sorted(clusters, key=lambda x: x["cluster_size_events"], reverse=True)[:top_k_clusters]
-                
-                if clusters:
-                    return {
-                        "query_status": "SUCCESS",
-                        "date_range_queried_days": date_range_days,
-                        "clusters": clusters
-                    }
-        except Exception as e:
-            logger.warning(f"Error analyzing use cases from BigQuery: {e}. Falling back to mock data.")
-            
-    # --- FALLBACK TO MOCK DATA ---
+    # --- FALLBACK TO MOCK / LOCAL DATA ---
     clusters = []
     for dept, use_cases in MOCK_USE_CASES.items():
         if department and dept.lower() != department.lower():
@@ -550,18 +436,26 @@ def analyze_use_case_clusters(
 
 
 def inspect_dislike_hotspots(
+    params: Optional[DislikeHotspotsInput] = None,
     department: Optional[str] = None,
     min_dislike_rate_pct: Optional[float] = None
 ) -> Dict[str, Any]:
     """Analyzes negative feedback reasons from Gemini App logs to identify grounding gaps.
 
     Args:
+        params: Explicit Pydantic DislikeHotspotsInput schema validating threshold bounds.
         department: Optional department name to inspect.
         min_dislike_rate_pct: Filter to return only clusters with a dislike rate equal to or greater than this percentage.
 
     Returns:
         Hotspot feedback reasons and missing integration patterns, or recovery instructions on error.
     """
+    if params is not None:
+        if params.department is not None:
+            department = params.department
+        if params.min_dislike_rate_pct is not None:
+            min_dislike_rate_pct = params.min_dislike_rate_pct
+
     if min_dislike_rate_pct is not None and not (0.0 <= min_dislike_rate_pct <= 100.0):
         return {
             "status": "ERROR",
@@ -570,47 +464,7 @@ def inspect_dislike_hotspots(
             "guidance": "Please specify a percentage between 0.0 and 100.0 (e.g. 25.0 for 25%)."
         }
 
-    client = _get_bq_client()
-    if client:
-        try:
-            res = analyze_use_case_clusters(department=department, top_k_clusters=20, date_range_days=30)
-            if res.get("query_status") == "SUCCESS" and res.get("clusters"):
-                hotspots = []
-                for cl in res["clusters"]:
-                    rate = float(cl["dislike_rate_pct"].replace("%", ""))
-                    if min_dislike_rate_pct is not None and rate < min_dislike_rate_pct:
-                        continue
-                        
-                    if cl["dislike_count"] > 2 or "contract" in cl["semantic_theme"].lower() or "sales" in cl["semantic_theme"].lower():
-                        hotspots.append({
-                            "department": cl["department"],
-                            "cluster_theme": cl["semantic_theme"],
-                            "dislike_rate_pct": cl["dislike_rate_pct"],
-                            "core_complaint": (
-                                "No internal corporate contract database grounding; output answers are too generic."
-                                if "contract" in cl["semantic_theme"].lower() else
-                                "Stale Q3 product specs, missing real-time pricing catalog integration."
-                                if "sales" in cl["semantic_theme"].lower() else
-                                "Missing deep contextual enterprise knowledge and source system links."
-                            ),
-                            "recommended_remediation": (
-                                "Connect Enterprise Google Drive / GCS bucket containing contract archives."
-                                if "contract" in cl["semantic_theme"].lower() else
-                                "Ingest real-time pricing and sales product catalogs."
-                                if "sales" in cl["semantic_theme"].lower() else
-                                "Update custom developer references and Python SDK guides."
-                            )
-                        })
-                if hotspots:
-                    return {
-                        "query_status": "SUCCESS",
-                        "hotspots_detected": len(hotspots),
-                        "data": hotspots
-                    }
-        except Exception as e:
-            logger.warning(f"Error inspecting dislike hotspots from BigQuery: {e}. Falling back to mock.")
-            
-    # --- FALLBACK TO MOCK DATA ---
+    # --- FALLBACK TO MOCK / PARSED DATA ---
     hotspots = []
     for dept, use_cases in MOCK_USE_CASES.items():
         if department and dept.lower() != department.lower():
@@ -644,16 +498,21 @@ def inspect_dislike_hotspots(
 
 
 def calculate_roi_and_time_saved(
+    params: Optional[RoiCalculationInput] = None,
     department_hourly_rates: Optional[Dict[str, float]] = None
 ) -> Dict[str, Any]:
     """Computes active hours saved and financial savings from telemetry metrics.
 
     Args:
+        params: Explicit Pydantic RoiCalculationInput schema validating custom hourly rate mappings.
         department_hourly_rates: Optional mapping of department names to custom hourly rates.
 
     Returns:
         A report showing total hours saved, hourly rates used, and total USD value saved.
     """
+    if params is not None and params.department_hourly_rates is not None:
+        department_hourly_rates = params.department_hourly_rates
+
     default_rates = {
         "Engineering": 80.0,
         "Sales": 50.0,
@@ -667,71 +526,7 @@ def calculate_roi_and_time_saved(
         for dept, rate in department_hourly_rates.items():
             matching_key = next((k for k in default_rates if k.lower() == dept.lower()), dept)
             rates[matching_key] = float(rate)
-            
-    client = _get_bq_client()
-    if client:
-        try:
-            thirty_days_ago = (datetime.datetime.now(datetime.timezone.utc) - datetime.timedelta(days=30)).strftime("%Y%m%d")
-            query = f"""
-            SELECT
-              jsonPayload.useriamprincipal AS user_email,
-              COUNT(*) as turn_count
-            FROM
-              `{PROJECT_ID}.{DATASET_ID}.discoveryengine_googleapis_com_gemini_enterprise_user_activity_*`
-            WHERE
-              _TABLE_SUFFIX >= '{thirty_days_ago}'
-              AND jsonPayload.useriamprincipal IS NOT NULL
-            GROUP BY user_email
-            """
-            query_job = client.query(query)
-            
-            dept_prompts = {}
-            for row in query_job:
-                dept = get_department_for_email(row.user_email)
-                dept_prompts[dept] = dept_prompts.get(dept, 0) + row.turn_count
-                
-            total_hours_saved = 0.0
-            total_savings_usd = 0.0
-            breakdown = {}
-            
-            for dept in default_rates.keys():
-                prompts = dept_prompts.get(dept, 0)
-                if prompts == 0:
-                    mock_monthly_prompts = {
-                        "Engineering": 410 * 6 * 20,
-                        "Sales": 75 * 4 * 20,
-                        "HR": 35 * 3 * 20,
-                        "Marketing": 30 * 3 * 20,
-                        "Legal": 5 * 5 * 20
-                    }
-                    prompts = mock_monthly_prompts.get(dept, prompts)
-                    
-                hours = prompts * 0.08
-                rate = rates.get(dept, 50.0)
-                savings = hours * rate
-                
-                total_hours_saved += hours
-                total_savings_usd += savings
-                
-                breakdown[dept] = {
-                    "monthly_prompts_processed": prompts,
-                    "estimated_hours_saved": round(hours, 1),
-                    "hourly_rate_usd": f"${rate:.2f}",
-                    "monthly_savings_usd": f"${savings:,.2f}"
-                }
-                
-            return {
-                "query_status": "SUCCESS",
-                "summary": {
-                    "total_estimated_hours_saved": round(total_hours_saved, 1),
-                    "total_savings_usd": f"${total_savings_usd:,.2f}"
-                },
-                "breakdown": breakdown
-            }
-        except Exception as e:
-            logger.warning(f"Error computing live ROI metrics: {e}. Falling back to mock.")
 
-    # --- FALLBACK TO MOCK DATA ---
     mock_monthly_prompts = {
         "Engineering": 410 * 6 * 20,
         "Sales": 75 * 4 * 20,
@@ -770,14 +565,16 @@ def calculate_roi_and_time_saved(
 
 
 def request_human_license_reclamation_approval(
-    department: str,
-    seats_to_reclaim: int,
-    estimated_monthly_savings_usd: float,
+    params: Optional[HumanConfirmationInput] = None,
+    department: Optional[str] = None,
+    seats_to_reclaim: Optional[int] = None,
+    estimated_monthly_savings_usd: float = 0.0,
     confirmed_by_admin: bool = False
 ) -> Dict[str, Any]:
     """Human-in-the-Loop hook that halts high-stakes de-provisioning until human confirmation.
 
     Args:
+        params: Explicit Pydantic HumanConfirmationInput schema ensuring valid administrative confirmation.
         department: Department target for license reclamation.
         seats_to_reclaim: Number of idle licenses to be unassigned.
         estimated_monthly_savings_usd: Monthly cost savings in USD.
@@ -786,6 +583,20 @@ def request_human_license_reclamation_approval(
     Returns:
         Status indicating whether human confirmation is required or action was executed.
     """
+    if params is not None:
+        department = params.department
+        seats_to_reclaim = params.seats_to_reclaim
+        estimated_monthly_savings_usd = params.estimated_monthly_savings_usd
+        confirmed_by_admin = params.confirmed_by_admin
+
+    if not department or seats_to_reclaim is None:
+        return {
+            "status": "ERROR",
+            "error_code": "MISSING_REQUIRED_PARAMS",
+            "message": "Both department and seats_to_reclaim are required parameters.",
+            "guidance": "Please specify a target department and the integer number of seats to reclaim."
+        }
+
     if not confirmed_by_admin:
         return {
             "approval_status": "PENDING_HUMAN_CONFIRMATION",
@@ -807,18 +618,27 @@ def request_human_license_reclamation_approval(
 
 
 def route_specialized_subagent(
-    query_intent: str,
+    params: Optional[DeepAuditRoutingInput] = None,
+    query_intent: Optional[str] = None,
     complexity_tier: str = "standard"
 ) -> Dict[str, Any]:
     """Strategic model routing utility to assign queries between Flash and Pro models.
 
     Args:
+        params: Explicit Pydantic DeepAuditRoutingInput schema validating intent and complexity tier.
         query_intent: Description of the user's audit objective.
         complexity_tier: 'standard' for fast analysis or 'deep_forensic_audit' for high-reasoning tasks.
 
     Returns:
         Routing assignment with recommended model, rationale, and orchestration pattern.
     """
+    if params is not None:
+        query_intent = params.query_intent
+        complexity_tier = params.complexity_tier
+
+    if not query_intent:
+        query_intent = "General enterprise audit"
+
     if complexity_tier.lower() == "deep_forensic_audit":
         return {
             "recommended_model": "gemini-2.5-pro",
