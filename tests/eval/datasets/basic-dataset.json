@@ -1,0 +1,25 @@
+{
+  "eval_cases": [
+    {
+      "eval_case_id": "license_audit",
+      "prompt": {
+        "role": "user",
+        "parts": [{"text": "Which departments have low utilization under 40%? List their idle seats."}]
+      }
+    },
+    {
+      "eval_case_id": "feedback_hotspots",
+      "prompt": {
+        "role": "user",
+        "parts": [{"text": "Why does Legal have such a high dislike rate on their prompts? Inspect hotspots and suggest grounding data connectors."}]
+      }
+    },
+    {
+      "eval_case_id": "roi_analysis",
+      "prompt": {
+        "role": "user",
+        "parts": [{"text": "Run a financial report of total corporate ROI and time saved."}]
+      }
+    }
+  ]
+}
