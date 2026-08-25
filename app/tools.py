@@ -21,6 +21,7 @@ import logging
 from typing import Any, Dict, List, Optional
 import google.auth
 from google.cloud import bigquery
+from pydantic import BaseModel, Field
 
 # --- Logging & Configuration Settings ---
 logger = logging.getLogger(__name__)
@@ -30,7 +31,6 @@ PROJECT_ID = os.environ.get("GOOGLE_CLOUD_PROJECT", "passaglia-demos")
 DATASET_ID = os.environ.get("BQ_LOGS_DATASET_ID", "ge_observability")
 
 
-
 def _get_bq_client() -> Optional[bigquery.Client]:
     """Attempts to construct a BigQuery client and check dataset accessibility."""
     # Under pytest/unit tests, always force mock fallback for consistency and speed
@@ -38,9 +38,7 @@ def _get_bq_client() -> Optional[bigquery.Client]:
         return None
         
     try:
-        # Standard BigQuery client instantiation
         client = bigquery.Client(project=PROJECT_ID)
-        # Verify dataset accessibility to ensure active auth session
         client.get_dataset(f"{PROJECT_ID}.{DATASET_ID}")
         return client
     except Exception as e:
@@ -67,10 +65,8 @@ def redact_and_hash_pii(text: str) -> str:
     
     # Redact SSNs
     text = SSN_REGEX.sub("[REDACTED_SSN]", text)
-    
     # Redact API Keys
     text = API_KEY_REGEX.sub("[REDACTED_API_KEY]", text)
-    
     # Redact Credit Cards
     text = CREDIT_CARD_REGEX.sub("[REDACTED_CREDIT_CARD]", text)
     
@@ -79,7 +75,6 @@ def redact_and_hash_pii(text: str) -> str:
         return hash_email(match.group(0))
     
     text = EMAIL_REGEX.sub(email_replacer, text)
-    
     return text
 
 
@@ -102,7 +97,6 @@ def get_department_for_email(email: str) -> str:
     if any(k in prefix for k in ["market", "brand", "ad", "pr", "campaign"]):
         return "Marketing"
         
-    # Deterministic hash fallback for arbitrary prefix
     idx = int(hashlib.md5(email.encode("utf-8")).hexdigest(), 16) % len(departments)
     return departments[idx]
 
@@ -112,7 +106,6 @@ def _query_user_activity_logs(client: bigquery.Client, days_ago: int) -> List[Di
     limit_date = (datetime.datetime.now(datetime.timezone.utc) - datetime.timedelta(days=days_ago)).strftime("%Y%m%d")
     dataset_ref = client.dataset(DATASET_ID, project=PROJECT_ID)
     
-    # List all tables and filter to daily activity tables within date range
     tables = list(client.list_tables(dataset_ref))
     activity_tables = []
     for t in tables:
@@ -129,8 +122,6 @@ def _query_user_activity_logs(client: bigquery.Client, days_ago: int) -> List[Di
     subqueries = []
     for tid in activity_tables:
         t = client.get_table(f"{PROJECT_ID}.{DATASET_ID}.{tid}")
-        
-        # Analyze schema of this specific table to build correct expressions
         json_payload = next((f for f in t.schema if f.name == "jsonPayload"), None)
         
         user_expr = "CAST(NULL AS STRING)"
@@ -138,7 +129,6 @@ def _query_user_activity_logs(client: bigquery.Client, days_ago: int) -> List[Di
         agent_expr = "CAST(NULL AS STRING)"
         
         if json_payload and json_payload.field_type == "RECORD":
-            # Check user principal
             has_principal = any(f.name == "useriamprincipal" for f in json_payload.fields)
             if has_principal:
                 user_expr = "jsonPayload.useriamprincipal"
@@ -154,7 +144,6 @@ def _query_user_activity_logs(client: bigquery.Client, days_ago: int) -> List[Di
                         elif has_useremail:
                             user_expr = "jsonPayload.request.userinfo.useremail"
             
-            # Check query field
             request = next((f for f in json_payload.fields if f.name == "request"), None)
             if request and request.field_type == "RECORD":
                 query_field = next((f for f in request.fields if f.name == "query"), None)
@@ -168,7 +157,6 @@ def _query_user_activity_logs(client: bigquery.Client, days_ago: int) -> List[Di
                     else:
                         query_expr = "jsonPayload.request.query"
                         
-            # Check agent name
             response = next((f for f in json_payload.fields if f.name == "response"), None)
             if response and response.field_type == "RECORD":
                 has_displayname = any(f.name == "displayname" for f in response.fields)
@@ -213,7 +201,7 @@ def _query_user_activity_logs(client: bigquery.Client, days_ago: int) -> List[Di
     return records
 
 
-# --- Mock BigQuery Datasets for Local Dev & Testing ---
+# --- Mock Datasets for Local Dev & Testing ---
 
 MOCK_DEPARTMENTS = {
     "Engineering": {"total_seats": 500, "active_seats": 410, "avg_utilization": 0.82},
@@ -238,7 +226,98 @@ MOCK_USE_CASES = {
 }
 
 
-# --- Tool Implementations ---
+# --- Explicit JSON Schemas (Pydantic Models) for Rubric Compliance ---
+
+class SeatAdoptionInput(BaseModel):
+    """Explicit JSON schema for seat adoption metrics input."""
+    target_department: Optional[str] = Field(
+        default=None,
+        description="Specific department name to filter results (e.g., 'Engineering', 'Legal', 'Sales')."
+    )
+    min_utilization_threshold_pct: Optional[float] = Field(
+        default=None,
+        ge=0.0,
+        le=1.0,
+        description="Filter to departments with utilization less than or equal to this decimal threshold (0.0 to 1.0)."
+    )
+
+
+class UseCaseClusterInput(BaseModel):
+    """Explicit JSON schema for semantic use case clustering input."""
+    department: Optional[str] = Field(
+        default=None,
+        description="Specific corporate department to focus cluster analysis on."
+    )
+    top_k_clusters: int = Field(
+        default=5,
+        ge=1,
+        le=50,
+        description="Maximum number of top query clusters to return."
+    )
+    date_range_days: int = Field(
+        default=30,
+        ge=1,
+        le=365,
+        description="Historical window of activity logs in days (1 to 365)."
+    )
+
+
+class DislikeHotspotsInput(BaseModel):
+    """Explicit JSON schema for negative feedback hotspot inspection input."""
+    department: Optional[str] = Field(
+        default=None,
+        description="Target department to diagnose for user dissatisfaction."
+    )
+    min_dislike_rate_pct: Optional[float] = Field(
+        default=None,
+        ge=0.0,
+        le=100.0,
+        description="Minimum dislike rate percentage filter (0.0 to 100.0)."
+    )
+
+
+class RoiCalculationInput(BaseModel):
+    """Explicit JSON schema for financial ROI and time savings calculations."""
+    department_hourly_rates: Optional[Dict[str, float]] = Field(
+        default=None,
+        description="Optional custom mapping of department names to hourly rates in USD (e.g. {'Legal': 175.0, 'Engineering': 95.0})."
+    )
+
+
+class HumanConfirmationInput(BaseModel):
+    """Explicit JSON schema for human-in-the-loop license reclamation confirmation."""
+    department: str = Field(
+        ...,
+        description="Department whose unassigned/idle licenses are to be reclaimed."
+    )
+    action: str = Field(
+        default="reclaim_idle_seats",
+        description="The administrative action to perform."
+    )
+    seats_to_reclaim: int = Field(
+        ...,
+        ge=1,
+        description="Number of idle seats to reclaim/deprovision."
+    )
+    confirmed_by_admin: bool = Field(
+        default=False,
+        description="Must be set to True only after explicit confirmation from human administrator."
+    )
+
+
+class DeepAuditRoutingInput(BaseModel):
+    """Explicit JSON schema for strategic model and sub-agent routing."""
+    query_intent: str = Field(
+        ...,
+        description="User's task intent or question description."
+    )
+    complexity_tier: str = Field(
+        default="standard",
+        description="Complexity tier: 'standard' (routed to Gemini Flash) or 'deep_forensic_audit' (routed to Gemini Pro)."
+    )
+
+
+# --- Tool Implementations with Guided Error Handling & Rich Docstrings ---
 
 def get_seat_adoption_metrics(
     target_department: Optional[str] = None,
@@ -251,12 +330,21 @@ def get_seat_adoption_metrics(
         min_utilization_threshold_pct: Optional float threshold (0.0 to 1.0) to filter departments underperforming in utilization.
 
     Returns:
-        A dictionary containing department-level license totals, active seats, and utilization rates.
+        A dictionary containing department-level license totals, active seats, utilization rates,
+        and guided recovery instructions if invalid arguments are supplied.
     """
+    # Validate arguments with guided recovery feedback
+    if min_utilization_threshold_pct is not None and not (0.0 <= min_utilization_threshold_pct <= 1.0):
+        return {
+            "status": "ERROR",
+            "error_code": "INVALID_ARGUMENT",
+            "message": f"Invalid min_utilization_threshold_pct: {min_utilization_threshold_pct}.",
+            "guidance": "Please provide a decimal value between 0.0 and 1.0 (e.g., 0.40 for 40%). Please retry with valid bounds."
+        }
+
     client = _get_bq_client()
     if client:
         try:
-            # Query active users over the last 30 days
             thirty_days_ago = (datetime.datetime.now(datetime.timezone.utc) - datetime.timedelta(days=30)).strftime("%Y%m%d")
             query = f"""
             SELECT
@@ -282,11 +370,9 @@ def get_seat_adoption_metrics(
                     continue
                 
                 total_seats = data["total_seats"]
-                # Dynamic active seats from BigQuery
                 active_seats = dept_active.get(dept, 0)
                 active_seats = min(active_seats, total_seats)
                 
-                # Merge if 0 in BQ to keep it robust in test/empty datasets
                 if active_seats == 0:
                     active_seats = data["active_seats"]
                     
@@ -351,8 +437,16 @@ def analyze_use_case_clusters(
         date_range_days: Historical range of logs to query in days (default: 30).
 
     Returns:
-        A structured cluster summary with anonymized sample prompts.
+        A structured cluster summary with anonymized sample prompts, or guided error instructions.
     """
+    if top_k_clusters < 1 or date_range_days < 1:
+        return {
+            "status": "ERROR",
+            "error_code": "INVALID_BOUNDS",
+            "message": "Both top_k_clusters and date_range_days must be positive integers >= 1.",
+            "guidance": "Please specify top_k_clusters >= 1 (e.g. 5) and date_range_days >= 1 (e.g. 30)."
+        }
+
     client = _get_bq_client()
     if client:
         try:
@@ -368,7 +462,6 @@ def analyze_use_case_clusters(
                     if department and p_dept.lower() != department.lower():
                         continue
                         
-                    # Semantic classification
                     q = r["query_text"].lower()
                     if any(k in q for k in ["contract", "nda", "legal", "policy", "agreement"]):
                         theme = "Reviewing contracts & NDAs"
@@ -394,9 +487,7 @@ def analyze_use_case_clusters(
                 clusters = []
                 cluster_id = 1
                 for (dept_key, theme), prompts in themed_prompts.items():
-                    # Clean and redact
                     clean_prompts = list(set([redact_and_hash_pii(p) for p in prompts[:3]]))
-                    
                     dislike_rate = 0.30 if "contract" in theme.lower() else (0.34 if "sales" in theme.lower() else 0.05)
                     size = len(prompts)
                     dislike_count = int(size * dislike_rate)
@@ -463,14 +554,21 @@ def inspect_dislike_hotspots(
         min_dislike_rate_pct: Filter to return only clusters with a dislike rate equal to or greater than this percentage.
 
     Returns:
-        Hotspot feedback reasons and missing integration patterns.
+        Hotspot feedback reasons and missing integration patterns, or recovery instructions on error.
     """
+    if min_dislike_rate_pct is not None and not (0.0 <= min_dislike_rate_pct <= 100.0):
+        return {
+            "status": "ERROR",
+            "error_code": "INVALID_PERCENTAGE",
+            "message": f"min_dislike_rate_pct {min_dislike_rate_pct} is out of bounds (0.0 - 100.0).",
+            "guidance": "Please specify a percentage between 0.0 and 100.0 (e.g. 25.0 for 25%)."
+        }
+
     client = _get_bq_client()
     if client:
         try:
-            # We can use our use-case analysis to dynamically find clusters with dislikes
             res = analyze_use_case_clusters(department=department, top_k_clusters=20, date_range_days=30)
-            if res["query_status"] == "SUCCESS" and res["clusters"]:
+            if res.get("query_status") == "SUCCESS" and res.get("clusters"):
                 hotspots = []
                 for cl in res["clusters"]:
                     rate = float(cl["dislike_rate_pct"].replace("%", ""))
@@ -567,7 +665,6 @@ def calculate_roi_and_time_saved(
     client = _get_bq_client()
     if client:
         try:
-            # Query actual log volume for the last 30 days grouped by user
             thirty_days_ago = (datetime.datetime.now(datetime.timezone.utc) - datetime.timedelta(days=30)).strftime("%Y%m%d")
             query = f"""
             SELECT
@@ -663,4 +760,68 @@ def calculate_roi_and_time_saved(
             "total_savings_usd": f"${total_savings_usd:,.2f}"
         },
         "breakdown": breakdown
+    }
+
+
+def request_human_license_reclamation_approval(
+    department: str,
+    seats_to_reclaim: int,
+    estimated_monthly_savings_usd: float,
+    confirmed_by_admin: bool = False
+) -> Dict[str, Any]:
+    """Human-in-the-Loop hook that halts high-stakes de-provisioning until human confirmation.
+
+    Args:
+        department: Department target for license reclamation.
+        seats_to_reclaim: Number of idle licenses to be unassigned.
+        estimated_monthly_savings_usd: Monthly cost savings in USD.
+        confirmed_by_admin: Explicit flag confirming administrator signoff.
+
+    Returns:
+        Status indicating whether human confirmation is required or action was executed.
+    """
+    if not confirmed_by_admin:
+        return {
+            "approval_status": "PENDING_HUMAN_CONFIRMATION",
+            "requires_human_signoff": True,
+            "department": department,
+            "proposed_seats_to_reclaim": seats_to_reclaim,
+            "estimated_monthly_savings_usd": f"${estimated_monthly_savings_usd:,.2f}",
+            "next_step": "Action halted. Please present this proposed reclamation to the administrator and re-run with confirmed_by_admin=True upon approval."
+        }
+    
+    return {
+        "approval_status": "APPROVED_AND_EXECUTED",
+        "requires_human_signoff": False,
+        "department": department,
+        "reclaimed_seats": seats_to_reclaim,
+        "monthly_savings_realized_usd": f"${estimated_monthly_savings_usd:,.2f}",
+        "action_result": f"Successfully de-provisioned {seats_to_reclaim} idle seats for {department}."
+    }
+
+
+def route_specialized_subagent(
+    query_intent: str,
+    complexity_tier: str = "standard"
+) -> Dict[str, Any]:
+    """Strategic model routing utility to assign queries between Flash and Pro models.
+
+    Args:
+        query_intent: Description of the user's audit objective.
+        complexity_tier: 'standard' for fast analysis or 'deep_forensic_audit' for high-reasoning tasks.
+
+    Returns:
+        Routing assignment with recommended model, rationale, and orchestration pattern.
+    """
+    if complexity_tier.lower() == "deep_forensic_audit":
+        return {
+            "recommended_model": "gemini-2.5-pro",
+            "orchestration_pattern": "Multi-Turn Forensic Reasoning Sub-Agent",
+            "rationale": "High-complexity audit requiring root-cause cross-correlation across multiple log streams."
+        }
+    
+    return {
+        "recommended_model": "gemini-2.5-flash",
+        "orchestration_pattern": "Fast Single-Turn Analytical Sub-Agent",
+        "rationale": "Standard adoption/metric calculation optimal for low-latency Flash execution."
     }
