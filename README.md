@@ -4,7 +4,6 @@
 
 [![CI/CD Pipeline](https://github.com/lia-passaglia/ge-app-compass/actions/workflows/deploy_staging.yaml/badge.svg)](https://github.com/lia-passaglia/ge-app-compass/actions)
 [![Agent Runtime Deployed](https://img.shields.io/badge/Vertex%20AI-Reasoning%20Engines-blue)](https://cloud.google.com/vertex-ai)
-[![Score](https://img.shields.io/badge/AgentOps%20Rubric-95%2F95%20(100%25)-brightgreen)](#agentops-code-review-matrix-compliance)
 
 ---
 
@@ -167,14 +166,3 @@ agent = reasoning_engines.ReasoningEngine(
 for event in agent.stream_query(message="Run a department seat audit", user_id="admin"):
     print(event)
 ```
-
----
-
-## 🏛️ AgentOps Code Review Matrix Compliance
-
-This project complies with all **19 evaluation criteria (95/95 points)** of the AgentOps Code Review Matrix:
-- ✅ **Strict Schemas**: Explicit Pydantic input models for all tools.
-- ✅ **Guided Error Handling**: Self-healing recovery feedback returned on boundary errors.
-- ✅ **Strategic Model Routing**: Dynamic tiering between Flash (speed) and Pro (forensic reasoning).
-- ✅ **Human-in-the-Loop**: Protected administrative operations.
-- ✅ **Observability & PII Redaction**: OpenTelemetry tracing, BQ event analytics, and SHA-256 email hashing.
