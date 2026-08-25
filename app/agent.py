@@ -39,9 +39,12 @@ from .tools import (
 # Set up Cloud environment variables
 try:
     _, project_id = google.auth.default()
-    os.environ["GOOGLE_CLOUD_PROJECT"] = project_id
+    if project_id:
+        os.environ["GOOGLE_CLOUD_PROJECT"] = project_id
 except Exception:
-    project_id = os.environ.get("GOOGLE_CLOUD_PROJECT", "passaglia-demos")
+    pass
+
+project_id = os.environ.get("GOOGLE_CLOUD_PROJECT")
 
 os.environ["GOOGLE_CLOUD_LOCATION"] = "global"
 os.environ["GOOGLE_GENAI_USE_VERTEXAI"] = "True"

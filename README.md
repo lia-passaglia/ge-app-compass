@@ -126,7 +126,7 @@ Agent:
 
 ### Prerequisites
 - Python 3.11+ / 3.12 / 3.13 with [uv](https://docs.astral.sh/uv/)
-- Google Cloud SDK (`gcloud`) authenticated to project `passaglia-demos`
+- Google Cloud SDK (`gcloud`) authenticated to your GCP project (`gcloud auth application-default login`)
 
 ```bash
 # 1. Install dependencies
@@ -151,15 +151,15 @@ uv run pytest
 | **CI/CD** | GitHub Actions (`deploy_staging.yaml`) | **Passing** |
 | **IaC** | Terraform in `deployment/terraform/cicd` | **Applied** |
 
-To query the live deployed Reasoning Engine in Python:
+To query the deployed Reasoning Engine in Python:
 
 ```python
 import vertexai
 from vertexai.preview import reasoning_engines
 
-vertexai.init(project="passaglia-demos", location="us-central1")
+vertexai.init(project="<YOUR_GCP_PROJECT_ID>", location="us-central1")
 agent = reasoning_engines.ReasoningEngine(
-    "projects/991026205836/locations/us-central1/reasoningEngines/4203694086999244800"
+    "projects/<YOUR_PROJECT_NUMBER>/locations/us-central1/reasoningEngines/<REASONING_ENGINE_ID>"
 )
 
 # Stream responses live from Vertex AI

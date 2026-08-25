@@ -27,7 +27,13 @@ from pydantic import BaseModel, Field
 logger = logging.getLogger(__name__)
 
 # Resolve GCP Project ID and BigQuery telemetry dataset ID
-PROJECT_ID = os.environ.get("GOOGLE_CLOUD_PROJECT", "passaglia-demos")
+PROJECT_ID = os.environ.get("GOOGLE_CLOUD_PROJECT")
+if not PROJECT_ID:
+    try:
+        _, PROJECT_ID = google.auth.default()
+    except Exception:
+        PROJECT_ID = None
+
 DATASET_ID = os.environ.get("BQ_LOGS_DATASET_ID", "ge_observability")
 
 
