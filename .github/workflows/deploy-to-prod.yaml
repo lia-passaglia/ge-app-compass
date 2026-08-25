@@ -71,7 +71,7 @@ jobs:
 
       - name: Deploy to Production (Agent Runtime)
         run: |
-          uvx google-agents-cli deploy \
+          uvx google-agents-cli@0.3.0 deploy \
             --project ${{ vars.PROD_PROJECT_ID }} \
             --region ${{ vars.REGION }} \
             --service-account=${{ vars.APP_SERVICE_ACCOUNT_PROD }} \
